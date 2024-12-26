@@ -4,16 +4,13 @@
 # 1. Login to OpenShift before running this script.
 # 2. Make sure you have cluster-monitoring-view or higer permission.
 
-#!/bin/bash
-
 set -euo pipefail
 
 # Configuration
 readonly PROMETHEUS_SERVER="https://$(oc get route prometheus-k8s -n openshift-monitoring -o jsonpath='{.spec.host}')"
 readonly TOKEN=$(oc whoami -t)
 readonly TIME_RANGE="7d"
-readonly SAMPLE_RATE="5m"
-readonly OUTPUT_FILE="max_cpu_usage_7_days.csv"
+readonly OUTPUT_FILE="max_usage_$TIME_RANGE.csv"
 # For gather all namespaces 
 #readonly NAMESPACES=$(oc get namespaces -o jsonpath='{.items[*].metadata.name}')
 readonly NAMESPACES="openshift-apiserver openshift-monitoring"
@@ -47,7 +44,7 @@ convert_to_cpu() {
                 result+="$((value * 1000))m "
                 ;;
             *)
-                result+="$((item * 1000))m "
+                result+="$((value * 1000))m "
                 ;;
         esac
     done
@@ -112,7 +109,30 @@ sum_memory() {
 }
 
 convert_bytes_to_mi() {
-    echo "$((${1:-0} / 1024 / 1024))Mi"
+    local bytes="${1:-0}"
+    if [[ "$bytes" == "null" || -z "$bytes" ]]; then
+        echo "No Data"
+    else
+        echo "$((bytes / 1024 / 1024))Mi"
+    fi
+}
+
+# Network conversion function
+convert_bytes_to_readable() {
+    local bytes="${1:-0}"
+    if [[ "$bytes" == "null" || -z "$bytes" ]]; then
+        echo "No Data"
+    else
+        # 先將浮點數轉為整數（捨去小數點）
+        bytes=$(printf "%.0f" "$bytes")
+        if ((bytes < 1024)); then
+            echo "${bytes}B/s"
+        elif ((bytes < 1048576)); then
+            echo "$((bytes / 1024))KB/s"
+        else
+            echo "$((bytes / 1048576))MB/s"
+        fi
+    fi
 }
 
 # Query Prometheus function
@@ -141,7 +161,7 @@ get_pod_resources() {
 
 # Initialize CSV
 init_csv() {
-    echo "Namespace,Pod,Max CPU Usage (mCores),Total CPU Request (mCores),Total CPU Limit (mCores),Max Mem Usage,Total Mem Request,Total Mem Limit" > "$OUTPUT_FILE"
+    echo "Namespace,Pod,Max CPU Usage (mCores),Total CPU Request (mCores),Total CPU Limit (mCores),Max Mem Usage,Total Mem Request,Total Mem Limit,Max Network Receive,Max Network Transmit" > "$OUTPUT_FILE"
     log "Initialized CSV file: $OUTPUT_FILE"
 }
 
@@ -162,6 +182,15 @@ process_pod() {
     local mem_result=$(query_prometheus "$mem_query")
     [[ "$mem_result" != "No Data" ]] && mem_result=$(convert_bytes_to_mi "$mem_result")
     
+    # Network metrics
+    local network_receive_query="max_over_time(sum(irate(container_network_receive_bytes_total{namespace=\"$namespace\", pod=\"$pod\"}[5m]))[$TIME_RANGE:])"
+    local network_receive_result=$(query_prometheus "$network_receive_query")
+    [[ "$network_receive_result" != "No Data" ]] && network_receive_result=$(convert_bytes_to_readable "$network_receive_result")
+    
+    local network_transmit_query="max_over_time(sum(irate(container_network_transmit_bytes_total{namespace=\"$namespace\", pod=\"$pod\"}[5m]))[$TIME_RANGE:])"
+    local network_transmit_result=$(query_prometheus "$network_transmit_query")
+    [[ "$network_transmit_result" != "No Data" ]] && network_transmit_result=$(convert_bytes_to_readable "$network_transmit_result")
+    
     # Resource requests and limits
     local cpu_request=$(get_pod_resources "$namespace" "$pod" "cpu" "requests")
     local cpu_limit=$(get_pod_resources "$namespace" "$pod" "cpu" "limits")
@@ -181,6 +210,8 @@ process_pod() {
     : "${mem_result:=No Data}"
     : "${sum_memory_request:=No Data}"
     : "${sum_memory_limit:=No Data}"
+    : "${network_receive_result:=No Data}"
+    : "${network_transmit_result:=No Data}"
     
     # Log results
     log "Max CPU Usage: $cpu_result"
@@ -189,9 +220,11 @@ process_pod() {
     log "Max Mem Usage: $mem_result"
     log "Pod memory request: $sum_memory_request"
     log "Pod memory limit: $sum_memory_limit"
+    log "Max Network Receive: $network_receive_result"
+    log "Max Network Transmit: $network_transmit_result"
     
     # Write to CSV
-    echo "$namespace,$pod,$cpu_result,$sum_cpu_request,$sum_cpu_limit,$mem_result,$sum_memory_request,$sum_memory_limit" >> "$OUTPUT_FILE"
+    echo "$namespace,$pod,$cpu_result,$sum_cpu_request,$sum_cpu_limit,$mem_result,$sum_memory_request,$sum_memory_limit,$network_receive_result,$network_transmit_result" >> "$OUTPUT_FILE"
 }
 
 main() {
