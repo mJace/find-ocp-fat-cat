@@ -134,3 +134,12 @@ The script provides detailed logging during execution:
    - Verify cluster-monitoring-view access
    - Check namespace access permissions
    - Validate token authentication
+
+
+# Analyze the csv file
+
+## Usage
+
+```
+python3 analyze_usage.py --input <result_from_fatcat.csv> --output <output.csv>
+```
